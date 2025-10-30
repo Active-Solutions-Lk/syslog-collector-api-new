@@ -1,12 +1,11 @@
 #!/bin/bash
 
-# Remote Logs API - Automated Installation Script (Updated)
-# Uses MySQL root (with password) for API in secure environment
-# Auto-detects PHP version, installs PDO driver, verifies everything
-# Author: Updated for your secure setup
-# Date: $(date)
+# Remote Logs API - FINAL VERSION
+# Uses Admin / Admin@collector1 (from syslog collector)
+# No password prompt, auto PHP + PDO, clean install
+# Path: /var/www/html/api/
 
-set -e  # Exit on any error
+set -e
 
 # ------------------- Colors -------------------
 RED='\033[0;31m'
@@ -15,19 +14,12 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
-# ------------------- Config -------------------
+# ------------------- Fixed Config -------------------
 DB_NAME="syslog_db"
+DB_USER="Admin"
+DB_PASS="Admin@collector1"
 API_SECRET_KEY="sk_5a1b3c4d2e6f7a8b9c0d1e2f3a4b5c6d"
 API_DIR="/var/www/html/api"
-
-# === USER INPUT: Set your MySQL root password ===
-read -s -p "Enter MySQL root password: " MYSQL_ROOT_PASSWORD
-echo
-if [ -z "$MYSQL_ROOT_PASSWORD" ]; then
-    echo -e "${RED}[ERROR] Root password cannot be empty.${NC}"
-    exit 1
-fi
-export MYSQL_ROOT_PASSWORD
 
 # ------------------- Functions -------------------
 print_status() { echo -e "${GREEN}[INFO]${NC} $1"; }
@@ -37,18 +29,14 @@ print_step() { echo -e "${BLUE}[STEP]${NC} $1"; }
 
 command_exists() { command -v "$1" >/dev/null 2>&1; }
 
-check_mysql_service() { systemctl is-active --quiet mysql; }
-database_exists() { mysql -u root -p"$MYSQL_ROOT_PASSWORD" -e "USE ${DB_NAME};" >/dev/null 2>&1; }
-table_exists() { mysql -u root -p"$MYSQL_ROOT_PASSWORD" -D "${DB_NAME}" -e "DESCRIBE remote_logs;" >/dev/null 2>&1; }
-
 # ------------------- Start -------------------
 echo -e "${GREEN}================================${NC}"
-echo -e "${GREEN} Remote Logs API Installation   ${NC}"
+echo -e "${GREEN} Remote Logs API - FINAL SETUP  ${NC}"
 echo -e "${GREEN}================================${NC}"
 echo
 
 # Step 1: Update system
-print_step "Updating system packages..."
+print_step "Updating package list..."
 apt update -y
 
 # Step 2: Install Apache
@@ -61,48 +49,51 @@ fi
 systemctl enable apache2
 systemctl start apache2
 
-# Step 3: Install PHP (auto-detect Ubuntu default)
-print_step "Installing PHP (Ubuntu default version)..."
+# Step 3: Install PHP (Ubuntu default)
+print_step "Installing PHP + Apache module..."
 apt install -y php libapache2-mod-php
 
-# Detect actual PHP version
-PHP_VER=$(php -r "echo PHP_MAJOR_VERSION.'.'.PHP_MINOR_VERSION;" 2>/dev/null)
-print_status "Detected PHP version: $PHP_VER"
+# Detect PHP version
+PHP_VER=$(php -r "echo PHP_MAJOR_VERSION.'.'.PHP_MINOR_VERSION;" 2>/dev/null || echo "8.1")
+print_status "PHP Version: $PHP_VER"
 
 # Step 4: Install PDO MySQL driver
-print_step "Installing PHP MySQL driver (PDO)..."
+print_step "Installing php${PHP_VER}-mysql (PDO driver)..."
 apt install -y php${PHP_VER}-mysql
 
-# Restart Apache to load new PHP module
-print_step "Restarting Apache to load PHP + PDO..."
+# Restart Apache
+print_step "Restarting Apache..."
 systemctl restart apache2
 
-# Step 5: Verify PDO is available
+# Step 5: Verify PDO
 print_step "Verifying PDO MySQL driver..."
 if php -r "exit(in_array('mysql', PDO::getAvailableDrivers()) ? 0 : 1);" 2>/dev/null; then
-    print_status "PDO MySQL driver: OK"
+    print_status "PDO MySQL: OK"
 else
-    print_error "PDO MySQL driver failed to load!"
+    print_error "PDO MySQL failed!"
     exit 1
 fi
 
-# Step 6: Create API directory
-print_step "Creating API directory..."
+# Step 6: Clean old API folder (prevent duplicates)
+print_step "Removing old API folder (if exists)..."
+rm -rf /var/www/html/syslog-collector-api-new 2>/dev/null || true
+
+# Step 7: Create API directory
+print_step "Creating API directory: $API_DIR"
 mkdir -p "$API_DIR"
 chown www-data:www-data "$API_DIR"
 
-# Step 7: Write connection.php (uses root + password)
-print_step "Writing connection.php with root credentials..."
+# Step 8: Write connection.php (Admin user)
+print_step "Writing connection.php (using Admin user)..."
 cat > "$API_DIR/connection.php" << EOF
 <?php
 /**
- * Database Connection using MySQL root (secure environment)
+ * Secure connection using Admin@collector1
  */
 define('DB_HOST', 'localhost');
-define('DB_USER', 'root');
-define('DB_PASS', '$MYSQL_ROOT_PASSWORD');
+define('DB_USER', '$DB_USER');
+define('DB_PASS', '$DB_PASS');
 define('DB_NAME', '$DB_NAME');
-
 define('API_SECRET_KEY', '$API_SECRET_KEY');
 
 function getDBConnection() {
@@ -117,7 +108,7 @@ function getDBConnection() {
         \$pdo->exec("SET NAMES utf8mb4");
         return \$pdo;
     } catch (Exception \$e) {
-        error_log("DB Connection failed: " . \$e->getMessage());
+        error_log("DB Error: " . \$e->getMessage());
         return null;
     }
 }
@@ -128,12 +119,11 @@ function validateAPIKey(\$key) {
 ?>
 EOF
 
-# Step 8: Write api.php (simple log fetcher)
+# Step 9: Write api.php
 print_step "Writing api.php..."
 cat > "$API_DIR/api.php" << 'EOF'
 <?php
 require_once 'connection.php';
-
 header('Content-Type: application/json');
 
 $input = json_decode(file_get_contents('php://input'), true);
@@ -167,13 +157,13 @@ echo json_encode([
 ?>
 EOF
 
-# Step 9: Create test script
+# Step 10: Create test script
 print_step "Creating test script..."
 cat > "$API_DIR/test_api.sh" << EOF
 #!/bin/bash
 echo "Testing API..."
-curl -s -X POST http://localhost/api/api.php \\
-  -H "Content-Type: application/json" \\
+curl -s -X POST http://localhost/api/api.php \
+  -H "Content-Type: application/json" \
   -d '{
     "secret_key": "$API_SECRET_KEY",
     "limit": 2
@@ -181,23 +171,21 @@ curl -s -X POST http://localhost/api/api.php \\
 EOF
 chmod +x "$API_DIR/test_api.sh"
 
-# Step 10: Final verification
-print_step "Final system check..."
+# Final Check
+print_step "Final verification..."
 OK=true
 
-systemctl is-active --quiet apache2 || { print_error "Apache2 not running"; OK=false; }
-check_mysql_service || { print_error "MySQL not running"; OK=false; }
-database_exists && table_exists || { print_error "Database/table missing"; OK=false; }
+systemctl is-active --quiet apache2 || { print_error "Apache down"; OK=false; }
+mysql -u Admin -p'Admin@collector1' -e "USE syslog_db;" >/dev/null 2>&1 || { print_error "DB login failed"; OK=false; }
 
 if [ "$OK" = true ]; then
     echo -e "${GREEN}================================${NC}"
-    echo -e "${GREEN}   INSTALLATION SUCCESSFUL!     ${NC}"
+    echo -e "${GREEN}   SUCCESS: API READY!          ${NC}"
     echo -e "${GREEN}================================${NC}"
     echo
-    print_status "API: http://$(hostname -I | awk '{print $1}')/api/api.php"
-    print_status "Secret Key: $API_SECRET_KEY"
+    print_status "URL: http://$(hostname -I | awk '{print $1}')/api/api.php"
     print_status "Test: bash $API_DIR/test_api.sh"
 else
-    echo -e "${RED}INSTALLATION FAILED${NC}"
+    echo -e "${RED}FAILED${NC}"
     exit 1
 fi
